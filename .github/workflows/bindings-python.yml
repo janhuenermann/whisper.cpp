@@ -1,4 +1,4 @@
-name: Bindings Tests (Go)
+name: Bindings Tests (Python)
 on:
   push:
     paths:
