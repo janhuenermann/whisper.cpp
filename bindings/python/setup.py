@@ -4,26 +4,31 @@ import subprocess
 import sys
 from setuptools import setup
 from sysconfig import get_path
-from pybind11.setup_helpers import Pybind11Extension, build_ext
+from pybind11.setup_helpers import Pybind11Extension, build_ext as _build_ext
 
-WHISPER_ENABLE_COREML = False
-
-
-def run_cmake():
-    # Run CMake to build the libwhisper library
-    cmake_dir = os.path.realpath(os.path.join("..", ".."))
-    pkg_build_dir = os.path.realpath("build")
-    os.makedirs(pkg_build_dir, exist_ok=True)
-
-    extra_cmake_flags = []
-    if WHISPER_ENABLE_COREML:
-        extra_cmake_flags.append("-DWHISPER_COREML=1")
-
-    subprocess.check_call(["cmake", "-DCMAKE_BUILD_TYPE=Release", *extra_cmake_flags, "-Wno-dev", cmake_dir], cwd=pkg_build_dir)
-    subprocess.check_call(["cmake", "--build", ".", "--target", "whisper"], cwd=pkg_build_dir)
+WHISPER_ENABLE_COREML = True
 
 
-run_cmake()
+class build_ext(_build_ext):
+    def run(self):
+        # Run CMake to build the libwhisper library
+        cmake_dir = os.path.realpath(os.path.join("..", ".."))
+        pkg_build_dir = os.path.realpath("build")
+        os.makedirs(pkg_build_dir, exist_ok=True)
+
+        extra_cmake_flags = []
+        if WHISPER_ENABLE_COREML:
+            extra_cmake_flags.append("-DWHISPER_COREML=1")
+
+        subprocess.check_call(["cmake", "-DCMAKE_BUILD_TYPE=Release", *extra_cmake_flags, "-Wno-dev", cmake_dir], cwd=pkg_build_dir)
+        subprocess.check_call(["cmake", "--build", ".", "--target", "whisper"], cwd=pkg_build_dir)
+
+        super().run()
+
+
+def find_library_paths():
+    yield from glob("build/libwhisper.*")
+
 
 lib_path = get_path("platlib")
 ext_modules = [
@@ -31,8 +36,9 @@ ext_modules = [
         "pywhisper",
         ["pybind.cpp"],
         include_dirs=[".", "../.."],
-        extra_link_args=["-Lbuild", "-lwhisper"],
-        runtime_library_dirs=[get_path("platlib")]
+        library_dirs=["./build"],
+        libraries=["whisper"],
+        runtime_library_dirs=[lib_path]
     ),
 ]
 
@@ -45,5 +51,5 @@ setup(
     license="MIT",
     cmdclass={"build_ext": build_ext},
     ext_modules=ext_modules,
-    data_files=[(os.path.relpath(lib_path, sys.prefix), glob(os.path.join("build", "libwhisper.*")))],
+    data_files=[(os.path.relpath(lib_path, sys.prefix), find_library_paths())],
 )
