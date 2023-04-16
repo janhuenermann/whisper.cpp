@@ -7,9 +7,11 @@ WHISPER_ENABLE_COREML = False
 
 
 def get_library_paths():
+    pkg_build_dir = os.path.relpath("build")
+    libraries = ["libwhisper.dylib"]
     if WHISPER_ENABLE_COREML:
-        return ("build/libwhisper.dylib", "build/libwhisper.coreml.dylib")
-    return ("build/libwhisper.dylib",)
+        libraries.append("libwhisper.coreml.dylib")
+    return [os.path.join(pkg_build_dir, lib) for lib in libraries]
 
 
 class build_ext(_build_ext):
