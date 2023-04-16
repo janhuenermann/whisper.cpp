@@ -1,0 +1,22 @@
+name: Bindings Tests (Go)
+on:
+  push:
+    paths:
+      - bindings/python/**
+      - whisper.h
+  pull_request:
+    paths:
+      - bindings/python/**
+      - whisper.h
+
+jobs:
+  ubuntu-latest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - uses: actions/checkout@v1
+      - run: |
+          cd bindings/python
+          pip install .
