@@ -1,3 +1,4 @@
+from glob import glob
 import os
 import subprocess
 from setuptools import setup
@@ -8,10 +9,8 @@ WHISPER_ENABLE_COREML = False
 
 def get_library_paths():
     pkg_build_dir = os.path.realpath("build")
-    libraries = ["libwhisper.dylib"]
-    if WHISPER_ENABLE_COREML:
-        libraries.append("libwhisper.coreml.dylib")
-    return [os.path.join(pkg_build_dir, lib) for lib in libraries]
+    lib_names = glob(os.path.join(pkg_build_dir, "libwhisper.*"))
+    return [os.path.join(pkg_build_dir, lib_name) for lib_name in lib_names]
 
 
 class build_ext(_build_ext):
@@ -27,10 +26,6 @@ class build_ext(_build_ext):
 
         subprocess.check_call(["cmake", "-DCMAKE_BUILD_TYPE=Release", *extra_cmake_flags, "-Wno-dev", cmake_dir], cwd=pkg_build_dir)
         subprocess.check_call(["cmake", "--build", ".", "--target", "whisper"], cwd=pkg_build_dir)
-
-        print("*** Build finished ***")
-        print("Following files in build dir:")
-        print(os.listdir(pkg_build_dir))
         super().run()
 
 
