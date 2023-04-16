@@ -1,2 +1,4 @@
 *.egg-info
 *.whl
+.pytest_cache
+__pycache__
