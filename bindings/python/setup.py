@@ -7,7 +7,7 @@ WHISPER_ENABLE_COREML = False
 
 
 def get_library_paths():
-    pkg_build_dir = os.path.relpath("build")
+    pkg_build_dir = os.path.realpath("build")
     libraries = ["libwhisper.dylib"]
     if WHISPER_ENABLE_COREML:
         libraries.append("libwhisper.coreml.dylib")
@@ -18,7 +18,7 @@ class build_ext(_build_ext):
     def run(self):
         # Run CMake to build the libwhisper library
         cmake_dir = os.path.realpath(os.path.join("..", ".."))
-        pkg_build_dir = os.path.relpath("build")
+        pkg_build_dir = os.path.realpath("build")
         os.makedirs(pkg_build_dir, exist_ok=True)
 
         extra_cmake_flags = []
@@ -27,6 +27,10 @@ class build_ext(_build_ext):
 
         subprocess.check_call(["cmake", "-DCMAKE_BUILD_TYPE=Release", *extra_cmake_flags, "-Wno-dev", cmake_dir], cwd=pkg_build_dir)
         subprocess.check_call(["cmake", "--build", ".", "--target", "whisper"], cwd=pkg_build_dir)
+
+        print("*** Build finished ***")
+        print("Following files in build dir:")
+        print(os.listdir(pkg_build_dir))
         super().run()
 
 
