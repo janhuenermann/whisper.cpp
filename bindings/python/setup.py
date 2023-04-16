@@ -6,7 +6,7 @@ from setuptools import setup
 from sysconfig import get_path
 from pybind11.setup_helpers import Pybind11Extension, build_ext as _build_ext
 
-WHISPER_ENABLE_COREML = True
+WHISPER_ENABLE_COREML = False
 
 
 class build_ext(_build_ext):
