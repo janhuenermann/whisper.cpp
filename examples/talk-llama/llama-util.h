@@ -14,6 +14,7 @@
 
 #include <string>
 #include <vector>
+#include <stdexcept>
 
 #ifdef __has_include
     #if __has_include(<unistd.h>)
@@ -21,12 +22,17 @@
         #if defined(_POSIX_MAPPED_FILES)
             #include <sys/mman.h>
         #endif
+        #if defined(_POSIX_MEMLOCK_RANGE)
+            #include <sys/resource.h>
+        #endif
     #endif
 #endif
 
 #if defined(_WIN32)
     #define WIN32_LEAN_AND_MEAN
-    #define NOMINMAX
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
     #include <windows.h>
     #include <io.h>
     #include <stdio.h> // for _fseeki64
@@ -41,7 +47,11 @@
     } while (0)
 
 #ifdef __GNUC__
+#ifdef __MINGW32__
+__attribute__((format(gnu_printf, 1, 2)))
+#else
 __attribute__((format(printf, 1, 2)))
+#endif
 #endif
 static std::string format(const char * fmt, ...) {
     va_list ap, ap2;
@@ -55,7 +65,7 @@ static std::string format(const char * fmt, ...) {
     va_end(ap2);
     va_end(ap);
     return std::string(buf.data(), size);
-};
+}
 
 struct llama_file {
     // use FILE * so we don't have to re-open the file to mmap
@@ -65,7 +75,7 @@ struct llama_file {
     llama_file(const char * fname, const char * mode) {
         fp = std::fopen(fname, mode);
         if (fp == NULL) {
-            throw format("failed to open %s: %s", fname, std::strerror(errno));
+            throw std::runtime_error(format("failed to open %s: %s", fname, strerror(errno)));
         }
         seek(0, SEEK_END);
         size = tell();
@@ -91,17 +101,17 @@ struct llama_file {
         LLAMA_ASSERT(ret == 0); // same
     }
 
-    void read_raw(void * ptr, size_t size) {
-        if (size == 0) {
+    void read_raw(void * ptr, size_t len) const {
+        if (len == 0) {
             return;
         }
         errno = 0;
-        std::size_t ret = std::fread(ptr, size, 1, fp);
+        std::size_t ret = std::fread(ptr, len, 1, fp);
         if (ferror(fp)) {
-            throw format("read error: %s", strerror(errno));
+            throw std::runtime_error(format("read error: %s", strerror(errno)));
         }
         if (ret != 1) {
-            throw std::string("unexpectedly reached end of file");
+            throw std::runtime_error(std::string("unexpectedly reached end of file"));
         }
     }
 
@@ -117,14 +127,14 @@ struct llama_file {
         return std::string(chars.data(), len);
     }
 
-    void write_raw(const void * ptr, size_t size) {
-        if (size == 0) {
+    void write_raw(const void * ptr, size_t len) const {
+        if (len == 0) {
             return;
         }
         errno = 0;
-        size_t ret = std::fwrite(ptr, size, 1, fp);
+        size_t ret = std::fwrite(ptr, len, 1, fp);
         if (ret != 1) {
-            throw format("write error: %s", strerror(errno));
+            throw std::runtime_error(format("write error: %s", strerror(errno)));
         }
     }
 
@@ -162,7 +172,7 @@ struct llama_mmap {
 #ifdef _POSIX_MAPPED_FILES
     static constexpr bool SUPPORTED = true;
 
-    llama_mmap(struct llama_file * file) {
+    llama_mmap(struct llama_file * file, size_t prefetch = (size_t) -1 /* -1 = max value */) {
         size = file->size;
         int fd = fileno(file->fp);
         int flags = MAP_SHARED;
@@ -170,15 +180,16 @@ struct llama_mmap {
         flags |= MAP_POPULATE;
 #endif
         addr = mmap(NULL, file->size, PROT_READ, flags, fd, 0);
-        close(fd);
         if (addr == MAP_FAILED) {
-            throw format("mmap failed: %s", strerror(errno));
+            throw std::runtime_error(format("mmap failed: %s", strerror(errno)));
         }
 
-        // Advise the kernel to preload the mapped memory
-        if (madvise(addr, file->size, MADV_WILLNEED)) {
-            fprintf(stderr, "warning: madvise(.., MADV_WILLNEED) failed: %s\n",
-                    strerror(errno));
+        if (prefetch > 0) {
+            // Advise the kernel to preload the mapped memory
+            if (posix_madvise(addr, std::min(file->size, prefetch), POSIX_MADV_WILLNEED)) {
+                fprintf(stderr, "warning: posix_madvise(.., POSIX_MADV_WILLNEED) failed: %s\n",
+                        strerror(errno));
+            }
         }
     }
 
@@ -188,17 +199,16 @@ struct llama_mmap {
 #elif defined(_WIN32)
     static constexpr bool SUPPORTED = true;
 
-    llama_mmap(struct llama_file * file) {
+    llama_mmap(struct llama_file * file, bool prefetch = true) {
         size = file->size;
 
         HANDLE hFile = (HANDLE) _get_osfhandle(_fileno(file->fp));
 
         HANDLE hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
         DWORD error = GetLastError();
-        CloseHandle(hFile);
 
         if (hMapping == NULL) {
-            throw format("CreateFileMappingA failed: %s", llama_format_win_err(error).c_str());
+            throw std::runtime_error(format("CreateFileMappingA failed: %s", llama_format_win_err(error).c_str()));
         }
 
         addr = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
@@ -206,17 +216,23 @@ struct llama_mmap {
         CloseHandle(hMapping);
 
         if (addr == NULL) {
-            throw format("MapViewOfFile failed: %s", llama_format_win_err(error).c_str());
+            throw std::runtime_error(format("MapViewOfFile failed: %s", llama_format_win_err(error).c_str()));
         }
 
-        // Advise the kernel to preload the mapped memory
-        WIN32_MEMORY_RANGE_ENTRY range;
-        range.VirtualAddress = addr;
-        range.NumberOfBytes = (SIZE_T)size;
-        if (!PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0)) {
-            fprintf(stderr, "warning: PrefetchVirtualMemory failed: %s\n",
-                    llama_format_win_err(GetLastError()).c_str());
+        #if _WIN32_WINNT >= _WIN32_WINNT_WIN8
+        if (prefetch) {
+            // Advise the kernel to preload the mapped memory
+            WIN32_MEMORY_RANGE_ENTRY range;
+            range.VirtualAddress = addr;
+            range.NumberOfBytes = (SIZE_T)size;
+            if (!PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0)) {
+                fprintf(stderr, "warning: PrefetchVirtualMemory failed: %s\n",
+                        llama_format_win_err(GetLastError()).c_str());
+            }
         }
+        #else
+        #pragma message("warning: You are building for pre-Windows 8; prefetch not supported")
+        #endif // _WIN32_WINNT >= _WIN32_WINNT_WIN8
     }
 
     ~llama_mmap() {
@@ -228,8 +244,9 @@ struct llama_mmap {
 #else
     static constexpr bool SUPPORTED = false;
 
-    llama_mmap(struct llama_file *) {
-        throw std::string("mmap not supported");
+    llama_mmap(struct llama_file *, bool prefetch = true) {
+        (void)prefetch;
+        throw std::runtime_error(std::string("mmap not supported"));
     }
 #endif
 };
@@ -250,9 +267,9 @@ struct llama_mlock {
         }
     }
 
-    void init(void * addr) {
-        LLAMA_ASSERT(this->addr == NULL && this->size == 0);
-        this->addr = addr;
+    void init(void * ptr) {
+        LLAMA_ASSERT(addr == NULL && size == 0);
+        addr = ptr;
     }
 
     void grow_to(size_t target_size) {
@@ -291,8 +308,18 @@ struct llama_mlock {
         if (!mlock(addr, size)) {
             return true;
         } else {
-            fprintf(stderr, "warning: failed to mlock %zu-byte buffer (after previously locking %zu bytes): %s\n" MLOCK_SUGGESTION,
-                    size, this->size, std::strerror(errno));
+            char* errmsg = std::strerror(errno);
+            bool suggest = (errno == ENOMEM);
+
+            // Check if the resource limit is fine after all
+            struct rlimit lock_limit;
+            if (suggest && getrlimit(RLIMIT_MEMLOCK, &lock_limit))
+                suggest = false;
+            if (suggest && (lock_limit.rlim_max > lock_limit.rlim_cur + size))
+                suggest = false;
+
+            fprintf(stderr, "warning: failed to mlock %zu-byte buffer (after previously locking %zu bytes): %s\n%s",
+                    size, this->size, errmsg, suggest ? MLOCK_SUGGESTION : "");
             return false;
         }
     }
@@ -313,14 +340,14 @@ struct llama_mlock {
         return (size_t) si.dwPageSize;
     }
 
-    bool raw_lock(void * addr, size_t size) {
+    bool raw_lock(void * ptr, size_t len) {
         for (int tries = 1; ; tries++) {
-            if (VirtualLock(addr, size)) {
+            if (VirtualLock(ptr, len)) {
                 return true;
             }
             if (tries == 2) {
                 fprintf(stderr, "warning: failed to VirtualLock %zu-byte buffer (after previously locking %zu bytes): %s\n",
-                        size, this->size, llama_format_win_err(GetLastError()).c_str());
+                    len, size, llama_format_win_err(GetLastError()).c_str());
                 return false;
             }
 
@@ -336,10 +363,10 @@ struct llama_mlock {
             // is equal to the number of pages in its minimum working set minus
             // a small overhead."
             // Hopefully a megabyte is enough overhead:
-            size_t increment = size + 1048576;
+            size_t increment = len + 1048576;
             // The minimum must be <= the maximum, so we need to increase both:
-            min_ws_size += size;
-            max_ws_size += size;
+            min_ws_size += increment;
+            max_ws_size += increment;
             if (!SetProcessWorkingSetSize(GetCurrentProcess(), min_ws_size, max_ws_size)) {
                 fprintf(stderr, "warning: SetProcessWorkingSetSize failed: %s\n",
                         llama_format_win_err(GetLastError()).c_str());
@@ -348,8 +375,8 @@ struct llama_mlock {
         }
     }
 
-    void raw_unlock(void * addr, size_t size) {
-        if (!VirtualUnlock(addr, size)) {
+    void raw_unlock(void * ptr, size_t len) {
+        if (!VirtualUnlock(ptr, len)) {
             fprintf(stderr, "warning: failed to VirtualUnlock buffer: %s\n",
                     llama_format_win_err(GetLastError()).c_str());
         }
@@ -357,11 +384,16 @@ struct llama_mlock {
 #else
     static constexpr bool SUPPORTED = false;
 
-    void raw_lock(const void * addr, size_t size) {
-        fprintf(stderr, "warning: mlock not supported on this system\n");
+    size_t lock_granularity() {
+        return (size_t) 65536;
     }
 
-    void raw_unlock(const void * addr, size_t size) {}
+    bool raw_lock(const void * addr, size_t len) {
+        fprintf(stderr, "warning: mlock not supported on this system\n");
+        return false;
+    }
+
+    void raw_unlock(const void * addr, size_t len) {}
 #endif
 };
 
@@ -370,14 +402,73 @@ struct llama_buffer {
     uint8_t * addr = NULL;
     size_t size = 0;
 
-    void resize(size_t size) {
+    llama_buffer() = default;
+
+    void resize(size_t len) {
         delete[] addr;
-        addr = new uint8_t[size];
-        this->size = size;
+        addr = new uint8_t[len];
+        size = len;
     }
 
     ~llama_buffer() {
         delete[] addr;
     }
+
+    // disable copy and move
+    llama_buffer(const llama_buffer&) = delete;
+    llama_buffer(llama_buffer&&) = delete;
+    llama_buffer& operator=(const llama_buffer&) = delete;
+    llama_buffer& operator=(llama_buffer&&) = delete;
 };
+
+#ifdef GGML_USE_CUBLAS
+#include "ggml-cuda.h"
+struct llama_ctx_buffer {
+    uint8_t * addr = NULL;
+    bool is_cuda;
+    size_t size = 0;
+
+    llama_ctx_buffer() = default;
+
+    void resize(size_t size) {
+        free();
+
+        addr = (uint8_t *) ggml_cuda_host_malloc(size);
+        if (addr) {
+            is_cuda = true;
+        }
+        else {
+            // fall back to pageable memory
+            addr = new uint8_t[size];
+            is_cuda = false;
+        }
+        this->size = size;
+    }
+
+    void free() {
+        if (addr) {
+            if (is_cuda) {
+                ggml_cuda_host_free(addr);
+            }
+            else {
+                delete[] addr;
+            }
+        }
+        addr = NULL;
+    }
+
+    ~llama_ctx_buffer() {
+        free();
+    }
+
+    // disable copy and move
+    llama_ctx_buffer(const llama_ctx_buffer&) = delete;
+    llama_ctx_buffer(llama_ctx_buffer&&) = delete;
+    llama_ctx_buffer& operator=(const llama_ctx_buffer&) = delete;
+    llama_ctx_buffer& operator=(llama_ctx_buffer&&) = delete;
+};
+#else
+typedef llama_buffer llama_ctx_buffer;
+#endif
+
 #endif
